@@ -1,11 +1,11 @@
-use just_tile::{http_reader, geotiff};
+use just_tile::{geotiff, http_reader};
 
 use axum::{
+    Router,
     extract::{Path, Query},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
-    http::{StatusCode, header},
 };
 use serde::Deserialize;
 use std::io::Cursor;
@@ -24,18 +24,18 @@ async fn get_tile(
     Path((z, x, y)): Path<(u32, u32, u32)>,
     Query(query): Query<TileQuery>,
 ) -> Result<Response, StatusCode> {
-    
     // Convert to a spawned blocking task because TIFF processing and HTTP range reading is synchronous.
     let tile_bytes = tokio::task::spawn_blocking(move || {
         let mut reader = http_reader::HttpRangeReader::new(&query.url)?;
 
-        let decoder = Decoder::new(&mut reader)
-            .map_err(|e| format!("TIFF decode error: {:?}", e))?;
+        let decoder =
+            Decoder::new(&mut reader).map_err(|e| format!("TIFF decode error: {:?}", e))?;
 
         let image = geotiff::extract_tile_from_cog(decoder, z, x, y)?;
 
         let mut out = Vec::new();
-        image.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        image
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
             .map_err(|e| format!("PNG encode error: {:?}", e))?;
 
         Ok::<Vec<u8>, String>(out)
@@ -53,7 +53,8 @@ async fn get_tile(
             (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
         ],
         tile_bytes,
-    ).into_response())
+    )
+        .into_response())
 }
 
 #[tokio::main]

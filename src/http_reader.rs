@@ -1,6 +1,6 @@
-use std::io::{Read, Seek, SeekFrom, Error, ErrorKind, Result};
 use std::cmp;
 use std::collections::HashMap;
+use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom};
 
 const CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB chunks
 
@@ -13,9 +13,15 @@ pub struct HttpRangeReader {
 
 impl HttpRangeReader {
     pub fn new(url: &str) -> std::result::Result<Self, String> {
-        let resp = ureq::head(url).call().map_err(|e| format!("HEAD request failed: {}", e))?;
-        let length_str = resp.header("content-length").ok_or("Missing content-length header")?;
-        let content_length: u64 = length_str.parse().map_err(|e| format!("Bad content length parsing: {}", e))?;
+        let resp = ureq::head(url)
+            .call()
+            .map_err(|e| format!("HEAD request failed: {}", e))?;
+        let length_str = resp
+            .header("content-length")
+            .ok_or("Missing content-length header")?;
+        let content_length: u64 = length_str
+            .parse()
+            .map_err(|e| format!("Bad content length parsing: {}", e))?;
 
         Ok(Self {
             url: url.to_string(),
@@ -28,17 +34,17 @@ impl HttpRangeReader {
     fn fetch_chunk(&mut self, chunk_index: u64) -> Result<()> {
         let start = chunk_index * CHUNK_SIZE;
         let end = cmp::min(start + CHUNK_SIZE - 1, self.content_length - 1);
-        
+
         let range_header = format!("bytes={}-{}", start, end);
         println!("Fetching HTTP Range: {}", range_header);
-        
+
         let resp = match ureq::get(&self.url).set("Range", &range_header).call() {
             Ok(r) => r,
-            Err(e) => return Err(Error::new(ErrorKind::Other, format!("HTTP Error: {}", e))),
+            Err(e) => return Err(Error::other(format!("HTTP Error: {}", e))),
         };
 
         if resp.status() != 200 && resp.status() != 206 {
-            return Err(Error::new(ErrorKind::Other, format!("HTTP Status: {}", resp.status())));
+            return Err(Error::other(format!("HTTP Status: {}", resp.status())));
         }
 
         let mut reader = resp.into_reader();
@@ -65,14 +71,15 @@ impl Read for HttpRangeReader {
 
         let chunk_data = self.cache.get(&chunk_index).unwrap();
         let bytes_available = chunk_data.len().saturating_sub(offset_in_chunk);
-        
+
         if bytes_available == 0 {
             return Ok(0);
         }
 
         let bytes_to_copy = cmp::min(buf.len(), bytes_available);
-        buf[..bytes_to_copy].copy_from_slice(&chunk_data[offset_in_chunk..offset_in_chunk + bytes_to_copy]);
-        
+        buf[..bytes_to_copy]
+            .copy_from_slice(&chunk_data[offset_in_chunk..offset_in_chunk + bytes_to_copy]);
+
         self.position += bytes_to_copy as u64;
         Ok(bytes_to_copy)
     }

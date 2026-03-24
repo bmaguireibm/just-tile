@@ -1,4 +1,4 @@
-use just_tile::{http_reader, geotiff};
+use just_tile::{geotiff, http_reader};
 use tiff::decoder::Decoder;
 
 #[test]
@@ -7,10 +7,10 @@ fn test_element84_cog() {
     println!("Testing against Dublin S3 COG...");
     let mut reader = http_reader::HttpRangeReader::new(url).unwrap();
     let decoder = Decoder::new(&mut reader).unwrap();
-    
+
     // Extents for Dublin
     let image = geotiff::extract_tile_from_cog(decoder, 11, 988, 660).unwrap();
-    
+
     assert_eq!(image.width(), 256);
     assert_eq!(image.height(), 256);
 }
