@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Just-Tile COG Tester</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+            backdrop-filter: blur(5px);
+            display: flex;
+            gap: 10px;
+            width: 80%;
+            max-width: 800px;
+        }
+        input {
+            flex-grow: 1;
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        button {
+            padding: 8px 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        button:hover { background: #0056b3; }
+        .info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <input type="text" id="urlInput" placeholder="Enter COG S3 URL (TCI.tif)" value="https://e84-earth-search-sentinel-data.s3.us-west-2.amazonaws.com/sentinel-2-c1-l2a/29/U/PV/2026/3/S2A_T29UPV_20260314T113337_L2A/TCI.tif">
+    <button onclick="updateMap()">Load COG</button>
+</div>
+
+<div class="info">
+    <b>Just-Tile MVP</b><br>
+    Fetching tiles from localhost:3000
+</div>
+
+<div id="map"></div>
+
+<script>
+    const map = L.map('map').setView([53.3498, -6.2603], 12); // Dublin
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    let cogLayer = null;
+
+    function updateMap() {
+        const url = document.getElementById('urlInput').value;
+        if (!url) return;
+
+        if (cogLayer) {
+            map.removeLayer(cogLayer);
+        }
+
+        const tileUrl = `http://localhost:3000/{z}/{x}/{y}?url=${encodeURIComponent(url)}`;
+        
+        cogLayer = L.tileLayer(tileUrl, {
+            maxZoom: 14,
+            minZoom: 0,
+            opacity: 1.0,
+            attribution: 'Sentinel-2 via Just-Tile'
+        }).addTo(map);
+        
+        console.log("Loading COG Tile Layer:", tileUrl);
+    }
+
+    // Load default
+    updateMap();
+</script>
+
+</body>
+</html>

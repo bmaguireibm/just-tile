@@ -97,8 +97,6 @@ impl Seek for HttpRangeReader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // A real mock testing would require an HTTP mocking framework,
     // but we can add basic unit tests or integration tests later.
 }

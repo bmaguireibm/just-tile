@@ -48,7 +48,10 @@ async fn get_tile(
     })?;
 
     Ok((
-        [(header::CONTENT_TYPE, "image/png")],
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
         tile_bytes,
     ).into_response())
 }
