@@ -1,6 +1,9 @@
 use std::cmp;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom};
+use reqwest::Client;
+use tokio::runtime::Handle;
+use futures::future::join_all;
 
 const CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB chunks
 
@@ -9,49 +12,103 @@ pub struct HttpRangeReader {
     content_length: u64,
     position: u64,
     cache: HashMap<u64, Vec<u8>>,
+    client: Client,
 }
 
 impl HttpRangeReader {
-    pub fn new(url: &str) -> std::result::Result<Self, String> {
-        let resp = ureq::head(url)
-            .call()
+    pub async fn new(url: &str, client: Client) -> std::result::Result<Self, String> {
+        let resp = client.head(url)
+            .send()
+            .await
             .map_err(|e| format!("HEAD request failed: {}", e))?;
-        let length_str = resp
-            .header("content-length")
-            .ok_or("Missing content-length header")?;
-        let content_length: u64 = length_str
-            .parse()
-            .map_err(|e| format!("Bad content length parsing: {}", e))?;
+        
+        let content_length = resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or("Missing or invalid content-length header")?;
 
         Ok(Self {
             url: url.to_string(),
             content_length,
             position: 0,
             cache: HashMap::new(),
+            client,
         })
     }
 
-    fn fetch_chunk(&mut self, chunk_index: u64) -> Result<()> {
-        let start = chunk_index * CHUNK_SIZE;
-        let end = cmp::min(start + CHUNK_SIZE - 1, self.content_length - 1);
+    /// Creates a reader with a known content length and shared client, avoiding a HEAD request.
+    pub fn new_with_details(url: &str, content_length: u64, client: Client) -> Self {
+        Self {
+            url: url.to_string(),
+            content_length,
+            position: 0,
+            cache: HashMap::new(),
+            client,
+        }
+    }
 
-        let range_header = format!("bytes={}-{}", start, end);
-        println!("Fetching HTTP Range: {}", range_header);
-
-        let resp = match ureq::get(&self.url).set("Range", &range_header).call() {
-            Ok(r) => r,
-            Err(e) => return Err(Error::other(format!("HTTP Error: {}", e))),
-        };
-
-        if resp.status() != 200 && resp.status() != 206 {
-            return Err(Error::other(format!("HTTP Status: {}", resp.status())));
+    /// Prefetches multiple chunks in parallel and stores them in the cache.
+    pub async fn prefetch_chunks(&mut self, chunk_indices: Vec<u64>) -> Result<()> {
+        let mut futures = Vec::new();
+        for idx in chunk_indices {
+            if !self.cache.contains_key(&idx) {
+                let url = self.url.clone();
+                let client = self.client.clone();
+                let total_len = self.content_length;
+                futures.push(async move {
+                    let start = idx * CHUNK_SIZE;
+                    let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
+                    let range = format!("bytes={}-{}", start, end);
+                    let resp = client.get(&url).header(reqwest::header::RANGE, &range).send().await
+                        .map_err(|e| Error::other(format!("Prefetch send error: {}", e)))?;
+                    if !resp.status().is_success() {
+                        return Err(Error::other(format!("HTTP Status: {}", resp.status())));
+                    }
+                    let bytes = resp.bytes().await
+                        .map_err(|e| Error::other(format!("Prefetch bytes error: {}", e)))?;
+                    Ok((idx, bytes.to_vec()))
+                });
+            }
         }
 
-        let mut reader = resp.into_reader();
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer)?;
+        let results = join_all(futures).await;
+        for res in results {
+            let (idx, data) = res.map_err(|e: Error| e)?;
+            self.cache.insert(idx, data);
+        }
+        Ok(())
+    }
 
-        self.cache.insert(chunk_index, buffer);
+    /// Returns the content length of the remote file.
+    pub fn content_length(&self) -> u64 {
+        self.content_length
+    }
+
+    fn fetch_chunk(&mut self, chunk_index: u64) -> Result<()> {
+        let url = self.url.clone();
+        let client = self.client.clone();
+        let total_len = self.content_length;
+
+        let data = tokio::task::block_in_place(|| {
+            Handle::current().block_on(async move {
+                let start = chunk_index * CHUNK_SIZE;
+                let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
+                let range = format!("bytes={}-{}", start, end);
+                println!("Fetching HTTP Range: {}", range);
+                let resp = client.get(&url).header(reqwest::header::RANGE, &range).send().await
+                    .map_err(|e| Error::other(format!("HTTP Error on chunk {}: {}", chunk_index, e)))?;
+                if !resp.status().is_success() {
+                    return Err(Error::other(format!("HTTP Status: {}", resp.status())));
+                }
+                let bytes = resp.bytes().await
+                    .map_err(|e| Error::other(format!("Fetch bytes error: {}", e)))?;
+                Ok(bytes.to_vec())
+            })
+        })?;
+
+        self.cache.insert(chunk_index, data);
         Ok(())
     }
 }
@@ -100,10 +157,4 @@ impl Seek for HttpRangeReader {
         self.position = new_pos as u64;
         Ok(self.position)
     }
-}
-
-#[cfg(test)]
-mod tests {
-    // A real mock testing would require an HTTP mocking framework,
-    // but we can add basic unit tests or integration tests later.
 }
