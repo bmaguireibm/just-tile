@@ -1,9 +1,9 @@
+use futures::future::join_all;
+use reqwest::Client;
 use std::cmp;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom};
-use reqwest::Client;
 use tokio::runtime::Handle;
-use futures::future::join_all;
 
 const CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB chunks
 
@@ -17,11 +17,12 @@ pub struct HttpRangeReader {
 
 impl HttpRangeReader {
     pub async fn new(url: &str, client: Client) -> std::result::Result<Self, String> {
-        let resp = client.head(url)
+        let resp = client
+            .head(url)
             .send()
             .await
             .map_err(|e| format!("HEAD request failed: {}", e))?;
-        
+
         let content_length = resp
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -61,12 +62,18 @@ impl HttpRangeReader {
                     let start = idx * CHUNK_SIZE;
                     let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
                     let range = format!("bytes={}-{}", start, end);
-                    let resp = client.get(&url).header(reqwest::header::RANGE, &range).send().await
+                    let resp = client
+                        .get(&url)
+                        .header(reqwest::header::RANGE, &range)
+                        .send()
+                        .await
                         .map_err(|e| Error::other(format!("Prefetch send error: {}", e)))?;
                     if !resp.status().is_success() {
                         return Err(Error::other(format!("HTTP Status: {}", resp.status())));
                     }
-                    let bytes = resp.bytes().await
+                    let bytes = resp
+                        .bytes()
+                        .await
                         .map_err(|e| Error::other(format!("Prefetch bytes error: {}", e)))?;
                     Ok((idx, bytes.to_vec()))
                 });
@@ -97,12 +104,20 @@ impl HttpRangeReader {
                 let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
                 let range = format!("bytes={}-{}", start, end);
                 println!("Fetching HTTP Range: {}", range);
-                let resp = client.get(&url).header(reqwest::header::RANGE, &range).send().await
-                    .map_err(|e| Error::other(format!("HTTP Error on chunk {}: {}", chunk_index, e)))?;
+                let resp = client
+                    .get(&url)
+                    .header(reqwest::header::RANGE, &range)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        Error::other(format!("HTTP Error on chunk {}: {}", chunk_index, e))
+                    })?;
                 if !resp.status().is_success() {
                     return Err(Error::other(format!("HTTP Status: {}", resp.status())));
                 }
-                let bytes = resp.bytes().await
+                let bytes = resp
+                    .bytes()
+                    .await
                     .map_err(|e| Error::other(format!("Fetch bytes error: {}", e)))?;
                 Ok(bytes.to_vec())
             })

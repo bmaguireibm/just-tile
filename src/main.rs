@@ -1,16 +1,16 @@
-use just_tile::{geotiff, http_reader, cache};
+use just_tile::{cache, geotiff, http_reader};
 
 use axum::{
-    Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
+    Router,
 };
 use serde::Deserialize;
 use std::io::Cursor;
-use tiff::decoder::Decoder;
 use std::sync::Arc;
+use tiff::decoder::Decoder;
 
 #[derive(Deserialize)]
 struct TileQuery {
@@ -52,11 +52,10 @@ async fn get_tile(
     // Phase 1: Planning (Determine which chunks we need)
     // We need a Decoder to plan, but planning is fast and doesn't read much except headers.
     let plan = {
-        let mut decoder = Decoder::new(&mut reader)
-            .map_err(|e| {
-                println!("TIFF plan error: {:?}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+        let mut decoder = Decoder::new(&mut reader).map_err(|e| {
+            println!("TIFF plan error: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         geotiff::plan_tile_extraction(&mut decoder, z, x, y).map_err(|e| {
             println!("Planning error: {}", e);
             StatusCode::BAD_REQUEST
@@ -82,22 +81,27 @@ async fn get_tile(
     // Phase 3: Execution (Blocking TIFF decoding and resampling)
     let tile_bytes = tokio::task::spawn_blocking(move || {
         use std::io::Seek;
-        reader.seek(std::io::SeekFrom::Start(0))
+        reader
+            .seek(std::io::SeekFrom::Start(0))
             .map_err(|e| format!("Reader seek error: {}", e))?;
 
-        let mut decoder = Decoder::new(&mut reader)
-            .map_err(|e| format!("TIFF decoder init error: {:?}", e))?;
+        let mut decoder =
+            Decoder::new(&mut reader).map_err(|e| format!("TIFF decoder init error: {:?}", e))?;
 
         // Cache the metadata if this was the first run (extract from IFD0)
         if cached_entry.is_none() {
             if let Ok(metadata) = geotiff::get_cog_metadata(&mut decoder) {
-                state.cache.insert(query.url.clone(), cache::CacheEntry {
-                    content_length: reader.content_length(),
-                    metadata,
-                });
+                state.cache.insert(
+                    query.url.clone(),
+                    cache::CacheEntry {
+                        content_length: reader.content_length(),
+                        metadata,
+                    },
+                );
             }
             // Reset decoder after metadata extraction to ensure we start next_image traversal from IFD0
-            reader.seek(std::io::SeekFrom::Start(0))
+            reader
+                .seek(std::io::SeekFrom::Start(0))
                 .map_err(|e| format!("Reader re-seek error: {}", e))?;
             decoder = Decoder::new(&mut reader)
                 .map_err(|e| format!("TIFF decoder re-init error: {:?}", e))?;
@@ -105,7 +109,9 @@ async fn get_tile(
 
         // Advance to the optimal IFD
         for _ in 0..plan.ifd_index {
-            decoder.next_image().map_err(|e| format!("TIFF IFD traversal error: {:?}", e))?;
+            decoder
+                .next_image()
+                .map_err(|e| format!("TIFF IFD traversal error: {:?}", e))?;
         }
 
         let image = geotiff::extract_tile_from_cog(decoder, plan)?;

@@ -1,6 +1,6 @@
+use crate::geotiff::CogMetadata;
 use std::collections::HashMap;
 use std::sync::RwLock;
-use crate::geotiff::CogMetadata;
 
 /// Internal entry for the COG cache.
 #[derive(Debug, Clone)]
@@ -12,6 +12,12 @@ pub struct CacheEntry {
 /// A simple thread-safe cache for COG headers and metadata.
 pub struct CogCache {
     entries: RwLock<HashMap<String, CacheEntry>>,
+}
+
+impl Default for CogCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CogCache {

@@ -96,7 +96,7 @@ pub fn calculate_mercator_bounds(z: u32, x: u32, y: u32) -> Bounds {
 pub struct TileExtractionPlan {
     pub ifd_index: u32,
     pub scale_factor: f64,
-    pub ifd_corners: [ (f64, f64); 4],
+    pub ifd_corners: [(f64, f64); 4],
     pub start_col: u32,
     pub end_col: u32,
     pub start_row: u32,
@@ -144,8 +144,14 @@ pub fn plan_tile_extraction<R: Read + Seek>(
         })
         .collect();
 
-    let pminx = px_corners.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
-    let pmaxx = px_corners.iter().map(|(x, _)| *x).fold(f64::NEG_INFINITY, f64::max);
+    let pminx = px_corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::INFINITY, f64::min);
+    let pmaxx = px_corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::NEG_INFINITY, f64::max);
     let crop_w_0 = (pmaxx - pminx).max(0.0);
 
     let mut current_width = meta0.width;
@@ -168,15 +174,39 @@ pub fn plan_tile_extraction<R: Read + Seek>(
         .iter()
         .map(|(px, py)| (px * scale_factor, py * scale_factor))
         .collect();
-    let ifd_corners = [ifd_corners_vec[0], ifd_corners_vec[1], ifd_corners_vec[2], ifd_corners_vec[3]];
+    let ifd_corners = [
+        ifd_corners_vec[0],
+        ifd_corners_vec[1],
+        ifd_corners_vec[2],
+        ifd_corners_vec[3],
+    ];
 
-    let iminx = ifd_corners.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min).floor() as i64;
-    let imaxx = ifd_corners.iter().map(|(x, _)| *x).fold(f64::NEG_INFINITY, f64::max).ceil() as i64;
-    let iminy = ifd_corners.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min).floor() as i64;
-    let imaxy = ifd_corners.iter().map(|(_, y)| *y).fold(f64::NEG_INFINITY, f64::max).ceil() as i64;
+    let iminx = ifd_corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::INFINITY, f64::min)
+        .floor() as i64;
+    let imaxx = ifd_corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::NEG_INFINITY, f64::max)
+        .ceil() as i64;
+    let iminy = ifd_corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::INFINITY, f64::min)
+        .floor() as i64;
+    let imaxy = ifd_corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::NEG_INFINITY, f64::max)
+        .ceil() as i64;
 
     let (tw, th) = reader.chunk_dimensions();
-    let is_rgba = matches!(reader.colortype().map_err(|e| format!("{:?}", e))?, tiff::ColorType::RGBA(_));
+    let is_rgba = matches!(
+        reader.colortype().map_err(|e| format!("{:?}", e))?,
+        tiff::ColorType::RGBA(_)
+    );
 
     Ok(TileExtractionPlan {
         ifd_index,
@@ -195,10 +225,10 @@ pub fn plan_tile_extraction<R: Read + Seek>(
 }
 
 /// Extracts a 256x256 map tile from a Cloud Optimized GeoTIFF (COG), given a pre-computed plan.
-/// 
+///
 /// This function performs two main steps:
 /// 1. **Data Loading**: Fetches and stitches the required TIFF chunks into a local buffer.
-/// 2. **Resampling**: Maps and interpolates the pixels from the buffer onto the 256x256 target tile 
+/// 2. **Resampling**: Maps and interpolates the pixels from the buffer onto the 256x256 target tile
 ///    using bilinear filtering.
 pub fn extract_tile_from_cog<R: Read + Seek>(
     mut reader: Decoder<R>,
@@ -218,25 +248,35 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
     for row in plan.start_row..=plan.end_row {
         for col in plan.start_col..=plan.end_col {
             let chunk_idx = row * tiles_x_count + col;
-            
+
             // Note: read_chunk will use the HttpRangeReader's cache if the chunk was prefetched.
             if let Ok(DecodingResult::U8(pixels)) = reader.read_chunk(chunk_idx) {
                 let channels = if plan.is_rgba { 4 } else { 3 };
                 let dx = (col - plan.start_col) * plan.tw;
                 let dy = (row - plan.start_row) * plan.th;
-                
+
                 // Copy pixels from the TIFF chunk into our local buffer
                 for py in 0..plan.th {
                     for px in 0..plan.tw {
                         let idx = ((py * plan.tw + px) * channels) as usize;
                         if idx + channels as usize <= pixels.len() {
                             if plan.is_rgba {
-                                buf_rgba.put_pixel(dx + px, dy + py, Rgba([
-                                    pixels[idx], pixels[idx + 1], pixels[idx + 2],
-                                    if channels == 4 { pixels[idx + 3] } else { 255 }
-                                ]));
+                                buf_rgba.put_pixel(
+                                    dx + px,
+                                    dy + py,
+                                    Rgba([
+                                        pixels[idx],
+                                        pixels[idx + 1],
+                                        pixels[idx + 2],
+                                        if channels == 4 { pixels[idx + 3] } else { 255 },
+                                    ]),
+                                );
                             } else {
-                                buf_rgb.put_pixel(dx + px, dy + py, Rgb([pixels[idx], pixels[idx + 1], pixels[idx + 2]]));
+                                buf_rgb.put_pixel(
+                                    dx + px,
+                                    dy + py,
+                                    Rgb([pixels[idx], pixels[idx + 1], pixels[idx + 2]]),
+                                );
                             }
                         }
                     }
@@ -261,10 +301,15 @@ fn resample_to_tile(
     buf_h: u32,
 ) -> RgbaImage {
     let mut target = RgbaImage::new(256, 256);
-    
+
     // Corner coordinates in the IFD's pixel space
-    let (tl, tr, bl, br) = (plan.ifd_corners[0], plan.ifd_corners[1], plan.ifd_corners[2], plan.ifd_corners[3]);
-    
+    let (tl, tr, bl, br) = (
+        plan.ifd_corners[0],
+        plan.ifd_corners[1],
+        plan.ifd_corners[2],
+        plan.ifd_corners[3],
+    );
+
     // Origin of the buffer in the IFD's pixel space
     let bx0 = (plan.start_col * plan.tw) as f64;
     let by0 = (plan.start_row * plan.th) as f64;
@@ -276,8 +321,14 @@ fn resample_to_tile(
             let v = ty as f64 / 255.0;
 
             // Bilinear interpolation of the four corners to find the exact source pixel coordinate (sx, sy)
-            let sx = (1.0 - u) * (1.0 - v) * tl.0 + u * (1.0 - v) * tr.0 + (1.0 - u) * v * bl.0 + u * v * br.0;
-            let sy = (1.0 - u) * (1.0 - v) * tl.1 + u * (1.0 - v) * tr.1 + (1.0 - u) * v * bl.1 + u * v * br.1;
+            let sx = (1.0 - u) * (1.0 - v) * tl.0
+                + u * (1.0 - v) * tr.0
+                + (1.0 - u) * v * bl.0
+                + u * v * br.0;
+            let sy = (1.0 - u) * (1.0 - v) * tl.1
+                + u * (1.0 - v) * tr.1
+                + (1.0 - u) * v * bl.1
+                + u * v * br.1;
 
             // Local coordinates within our fetched buffer
             let lx = sx - bx0;
