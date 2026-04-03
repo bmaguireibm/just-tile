@@ -13,10 +13,11 @@ async fn test_element84_cog() {
     let mut reader = http_reader::HttpRangeReader::new(url, client)
         .await
         .expect("Failed to create reader");
-    // Extents for Dublin
-    let mut decoder = Decoder::new(&mut reader).expect("Failed to create decoder");
-    let plan = geotiff::plan_tile_extraction(&mut decoder, z, x, y).expect("Failed to plan");
-    let image = geotiff::extract_tile_from_cog(decoder, plan).expect("Failed to extract");
+    let image = tokio::task::spawn_blocking(move || {
+        let mut decoder = Decoder::new(&mut reader).expect("Failed to create decoder");
+        let plan = geotiff::plan_tile_extraction(&mut decoder, z, x, y).expect("Failed to plan");
+        geotiff::extract_tile_from_cog(decoder, plan).expect("Failed to extract")
+    }).await.expect("Task panicked");
 
     assert_eq!(image.width(), 256);
     assert_eq!(image.height(), 256);
@@ -70,4 +71,31 @@ async fn test_element84_cog() {
             mismatch_count
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_border_zoom_10() {
+    let url = "https://e84-earth-search-sentinel-data.s3.us-west-2.amazonaws.com/sentinel-2-c1-l2a/29/U/PV/2026/3/S2A_T29UPV_20260314T113337_L2A/TCI.tif";
+    let client = reqwest::Client::new();
+    let mut reader = http_reader::HttpRangeReader::new(url, client.clone())
+        .await
+        .expect("Failed to create reader 1");
+    
+    // Evaluate 10/494/332 (which the user reports is skewed)
+    let image_result = tokio::task::spawn_blocking(move || {
+        let mut decoder = Decoder::new(&mut reader).expect("Failed to create decoder");
+        let plan = geotiff::plan_tile_extraction(&mut decoder, 10, 494, 332).expect("Failed to plan");
+        geotiff::extract_tile_from_cog(decoder, plan)
+    }).await.unwrap();
+
+    let image = image_result.expect("Tile extraction failed");
+    assert_eq!(image.width(), 256);
+    assert_eq!(image.height(), 256);
+
+    // Save outputs or analyze raw pixels to assert it's densely filled, preventing black skews
+    let gen_raw = image.to_rgba8().into_raw();
+    let bright_pixels = gen_raw.iter().filter(|&&p| p > 10).count();
+    
+    // Ensure > 20% of the image output isn't absolute black or heavily skewed transparency
+    assert!(bright_pixels > 50000, "Image contains anomalous amounts of black padded noise, which is expected by the skew bug");
 }

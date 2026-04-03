@@ -212,10 +212,10 @@ pub fn plan_tile_extraction<R: Read + Seek>(
         ifd_index,
         scale_factor,
         ifd_corners,
-        start_col: (iminx.max(0) as u32) / tw,
-        end_col: ((imaxx.max(0) as u32).min(current_width - 1)) / tw,
-        start_row: (iminy.max(0) as u32) / th,
-        end_row: ((imaxy.max(0) as u32).min(current_height - 1)) / th,
+        start_col: ((iminx.max(0) as u32).min(current_width.saturating_sub(1))) / tw,
+        end_col: ((imaxx.max(0) as u32).min(current_width.saturating_sub(1))) / tw,
+        start_row: ((iminy.max(0) as u32).min(current_height.saturating_sub(1))) / th,
+        end_row: ((imaxy.max(0) as u32).min(current_height.saturating_sub(1))) / th,
         tw,
         th,
         current_width,
@@ -243,41 +243,87 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
     let mut buf_rgb = RgbImage::new(buf_w, buf_h);
 
     let tiles_x_count = plan.current_width.div_ceil(plan.tw);
+    let tiles_y_count = plan.current_height.div_ceil(plan.th);
 
     // 2. Fetch Data: Loop through all required chunks and stitch them into the buffer.
     for row in plan.start_row..=plan.end_row {
         for col in plan.start_col..=plan.end_col {
             let chunk_idx = row * tiles_x_count + col;
 
-            // Note: read_chunk will use the HttpRangeReader's cache if the chunk was prefetched.
-            if let Ok(DecodingResult::U8(pixels)) = reader.read_chunk(chunk_idx) {
-                let channels = if plan.is_rgba { 4 } else { 3 };
-                let dx = (col - plan.start_col) * plan.tw;
-                let dy = (row - plan.start_row) * plan.th;
+            // Fetch the desired chunk, returning an error up the chain if decoding fails
+            let pixels = match reader.read_chunk(chunk_idx) {
+                Ok(DecodingResult::U8(px)) => px,
+                Err(tiff::TiffError::FormatError(tiff::TiffFormatError::InconsistentSizesEncountered)) => {
+                    // Occurs prominently on GDAL/S3 empty padding chunks due to jpeg misalignments
+                    continue;
+                }
+                Err(e) => return Err(format!("Failed to read chunk {}: {}", chunk_idx, e)),
+                _ => return Err(format!("Unexpected memory format from chunk {}", chunk_idx)),
+            };
 
-                // Copy pixels from the TIFF chunk into our local buffer
-                for py in 0..plan.th {
-                    for px in 0..plan.tw {
-                        let idx = ((py * plan.tw + px) * channels) as usize;
-                        if idx + channels as usize <= pixels.len() {
-                            if plan.is_rgba {
-                                buf_rgba.put_pixel(
-                                    dx + px,
-                                    dy + py,
-                                    Rgba([
-                                        pixels[idx],
-                                        pixels[idx + 1],
-                                        pixels[idx + 2],
-                                        if channels == 4 { pixels[idx + 3] } else { 255 },
-                                    ]),
-                                );
-                            } else {
-                                buf_rgb.put_pixel(
-                                    dx + px,
-                                    dy + py,
-                                    Rgb([pixels[idx], pixels[idx + 1], pixels[idx + 2]]),
-                                );
-                            }
+            let channels = if plan.is_rgba { 4 } else { 3 };
+            let dx = (col - plan.start_col) * plan.tw;
+            let dy = (row - plan.start_row) * plan.th;
+
+            let is_right_edge = col == tiles_x_count - 1;
+            let is_bottom_edge = row == tiles_y_count - 1;
+
+            let actual_w = if is_right_edge && plan.current_width % plan.tw != 0 {
+                (plan.current_width % plan.tw) as usize
+            } else {
+                plan.tw as usize
+            };
+
+            let actual_h = if is_bottom_edge && plan.current_height % plan.th != 0 {
+                (plan.current_height % plan.th) as usize
+            } else {
+                plan.th as usize
+            };
+
+            let mut stride_w = actual_w;
+            let expected_len = actual_w * actual_h * channels;
+            
+            if pixels.len() > expected_len {
+                let w16 = (actual_w + 15) / 16 * 16;
+                let h16 = (actual_h + 15) / 16 * 16;
+                if w16 * h16 * channels == pixels.len() {
+                    stride_w = w16;
+                } else {
+                    let w8 = (actual_w + 7) / 8 * 8;
+                    let h8 = (actual_h + 7) / 8 * 8;
+                    if w8 * h8 * channels == pixels.len() {
+                        stride_w = w8;
+                    } else if pixels.len() % (actual_h * channels) == 0 {
+                        stride_w = pixels.len() / (actual_h * channels);
+                    }
+                }
+            }
+
+            // Copy pixels from the TIFF chunk into our local buffer
+            for py in 0..plan.th {
+                for px in 0..plan.tw {
+                    if px as usize >= actual_w || py as usize >= actual_h {
+                        continue; // Truncated edge tiles pad out to undefined bounds
+                    }
+                    let idx = ((py as usize * stride_w + px as usize) * channels) as usize;
+                    if idx + channels <= pixels.len() {
+                        if plan.is_rgba {
+                            buf_rgba.put_pixel(
+                                dx + px,
+                                dy + py,
+                                Rgba([
+                                    pixels[idx],
+                                    pixels[idx + 1],
+                                    pixels[idx + 2],
+                                    if channels == 4 { pixels[idx + 3] } else { 255 },
+                                ]),
+                            );
+                        } else {
+                            buf_rgb.put_pixel(
+                                dx + px,
+                                dy + py,
+                                Rgb([pixels[idx], pixels[idx + 1], pixels[idx + 2]]),
+                            );
                         }
                     }
                 }

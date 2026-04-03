@@ -49,36 +49,7 @@ async fn get_tile(
             })?
     };
 
-    // Phase 1: Planning (Determine which chunks we need)
-    // We need a Decoder to plan, but planning is fast and doesn't read much except headers.
-    let plan = {
-        let mut decoder = Decoder::new(&mut reader).map_err(|e| {
-            println!("TIFF plan error: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        geotiff::plan_tile_extraction(&mut decoder, z, x, y).map_err(|e| {
-            println!("Planning error: {}", e);
-            StatusCode::BAD_REQUEST
-        })?
-    };
-
-    // Phase 2: Parallel Pre-fetching
-    let tiles_x_count = plan.current_width.div_ceil(plan.tw);
-    let mut chunk_indices = Vec::new();
-    for row in plan.start_row..=plan.end_row {
-        for col in plan.start_col..=plan.end_col {
-            chunk_indices.push((row * tiles_x_count + col) as u64);
-        }
-    }
-
-    // Also pre-fetch the very beginning of the file if not already there (for headers)
-    // and potentially other metadata chunks. But the plan already moved the reader.
-    reader.prefetch_chunks(chunk_indices).await.map_err(|e| {
-        println!("Prefetch error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // Phase 3: Execution (Blocking TIFF decoding and resampling)
+    // Execution (Blocking TIFF decoding and resampling)
     let tile_bytes = tokio::task::spawn_blocking(move || {
         use std::io::Seek;
         reader
@@ -107,12 +78,8 @@ async fn get_tile(
                 .map_err(|e| format!("TIFF decoder re-init error: {:?}", e))?;
         }
 
-        // Advance to the optimal IFD
-        for _ in 0..plan.ifd_index {
-            decoder
-                .next_image()
-                .map_err(|e| format!("TIFF IFD traversal error: {:?}", e))?;
-        }
+        let plan = geotiff::plan_tile_extraction(&mut decoder, z, x, y)
+            .map_err(|e| format!("Planning error: {}", e))?;
 
         let image = geotiff::extract_tile_from_cog(decoder, plan)?;
 

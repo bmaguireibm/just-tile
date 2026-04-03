@@ -1,4 +1,4 @@
-use futures::future::join_all;
+
 use reqwest::Client;
 use std::cmp;
 use std::collections::HashMap;
@@ -50,44 +50,6 @@ impl HttpRangeReader {
         }
     }
 
-    /// Prefetches multiple chunks in parallel and stores them in the cache.
-    pub async fn prefetch_chunks(&mut self, chunk_indices: Vec<u64>) -> Result<()> {
-        let mut futures = Vec::new();
-        for idx in chunk_indices {
-            if !self.cache.contains_key(&idx) {
-                let url = self.url.clone();
-                let client = self.client.clone();
-                let total_len = self.content_length;
-                futures.push(async move {
-                    let start = idx * CHUNK_SIZE;
-                    let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
-                    let range = format!("bytes={}-{}", start, end);
-                    let resp = client
-                        .get(&url)
-                        .header(reqwest::header::RANGE, &range)
-                        .send()
-                        .await
-                        .map_err(|e| Error::other(format!("Prefetch send error: {}", e)))?;
-                    if !resp.status().is_success() {
-                        return Err(Error::other(format!("HTTP Status: {}", resp.status())));
-                    }
-                    let bytes = resp
-                        .bytes()
-                        .await
-                        .map_err(|e| Error::other(format!("Prefetch bytes error: {}", e)))?;
-                    Ok((idx, bytes.to_vec()))
-                });
-            }
-        }
-
-        let results = join_all(futures).await;
-        for res in results {
-            let (idx, data) = res.map_err(|e: Error| e)?;
-            self.cache.insert(idx, data);
-        }
-        Ok(())
-    }
-
     /// Returns the content length of the remote file.
     pub fn content_length(&self) -> u64 {
         self.content_length
@@ -98,30 +60,56 @@ impl HttpRangeReader {
         let client = self.client.clone();
         let total_len = self.content_length;
 
-        let data = tokio::task::block_in_place(|| {
-            Handle::current().block_on(async move {
-                let start = chunk_index * CHUNK_SIZE;
-                let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
-                let range = format!("bytes={}-{}", start, end);
-                println!("Fetching HTTP Range: {}", range);
-                let resp = client
-                    .get(&url)
-                    .header(reqwest::header::RANGE, &range)
+        let start = chunk_index * CHUNK_SIZE;
+        let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
+        let range = format!("bytes={}-{}", start, end);
+        println!("Fetching HTTP Range: {}", range);
+
+        let mut attempts = 0;
+        let data = loop {
+            attempts += 1;
+            let range_clone = range.clone();
+            let url_clone = url.clone();
+            let client_clone = client.clone();
+            
+            let response = Handle::current().block_on(async {
+                client_clone
+                    .get(&url_clone)
+                    .header(reqwest::header::RANGE, &range_clone)
                     .send()
                     .await
-                    .map_err(|e| {
-                        Error::other(format!("HTTP Error on chunk {}: {}", chunk_index, e))
-                    })?;
-                if !resp.status().is_success() {
-                    return Err(Error::other(format!("HTTP Status: {}", resp.status())));
+            });
+
+            match response {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        if attempts < 3 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
+                        }
+                        return Err(Error::other(format!("HTTP Status: {}", resp.status())));
+                    }
+                    let bytes = Handle::current().block_on(async { resp.bytes().await });
+                    match bytes {
+                        Ok(b) => break b.to_vec(),
+                        Err(e) => {
+                            if attempts < 3 {
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                continue;
+                            }
+                            return Err(Error::other(format!("Fetch bytes error: {}", e)));
+                        }
+                    }
                 }
-                let bytes = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| Error::other(format!("Fetch bytes error: {}", e)))?;
-                Ok(bytes.to_vec())
-            })
-        })?;
+                Err(e) => {
+                    if attempts < 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
+                    return Err(Error::other(format!("HTTP Error on chunk {}: {}", chunk_index, e)));
+                }
+            }
+        };
 
         self.cache.insert(chunk_index, data);
         Ok(())
