@@ -1,4 +1,4 @@
-
+use crate::s3_auth::S3AuthManager;
 use reqwest::Client;
 use std::cmp;
 use std::collections::HashMap;
@@ -13,12 +13,24 @@ pub struct HttpRangeReader {
     position: u64,
     cache: HashMap<u64, Vec<u8>>,
     client: Client,
+    auth_manager: Option<S3AuthManager>,
+    aws_profile: Option<String>,
 }
 
 impl HttpRangeReader {
-    pub async fn new(url: &str, client: Client) -> std::result::Result<Self, String> {
-        let resp = client
-            .head(url)
+    pub async fn new(
+        url: &str,
+        client: Client,
+        auth_manager: Option<S3AuthManager>,
+        aws_profile: Option<String>,
+    ) -> std::result::Result<Self, String> {
+        let mut builder = client.head(url);
+        
+        if let Some(auth) = &auth_manager {
+            builder = auth.sign(builder, url, aws_profile.as_ref()).await?;
+        }
+
+        let resp = builder
             .send()
             .await
             .map_err(|e| format!("HEAD request failed: {}", e))?;
@@ -36,17 +48,27 @@ impl HttpRangeReader {
             position: 0,
             cache: HashMap::new(),
             client,
+            auth_manager,
+            aws_profile,
         })
     }
 
     /// Creates a reader with a known content length and shared client, avoiding a HEAD request.
-    pub fn new_with_details(url: &str, content_length: u64, client: Client) -> Self {
+    pub fn new_with_details(
+        url: &str,
+        content_length: u64,
+        client: Client,
+        auth_manager: Option<S3AuthManager>,
+        aws_profile: Option<String>,
+    ) -> Self {
         Self {
             url: url.to_string(),
             content_length,
             position: 0,
             cache: HashMap::new(),
             client,
+            auth_manager,
+            aws_profile,
         }
     }
 
@@ -59,6 +81,8 @@ impl HttpRangeReader {
         let url = self.url.clone();
         let client = self.client.clone();
         let total_len = self.content_length;
+        let auth_manager = self.auth_manager.clone();
+        let aws_profile = self.aws_profile.clone();
 
         let start = chunk_index * CHUNK_SIZE;
         let end = cmp::min(start + CHUNK_SIZE - 1, total_len - 1);
@@ -71,13 +95,21 @@ impl HttpRangeReader {
             let range_clone = range.clone();
             let url_clone = url.clone();
             let client_clone = client.clone();
+            let auth_clone = auth_manager.clone();
+            let profile_clone = aws_profile.clone();
             
             let response = Handle::current().block_on(async {
-                client_clone
+                let mut builder = client_clone
                     .get(&url_clone)
-                    .header(reqwest::header::RANGE, &range_clone)
-                    .send()
-                    .await
+                    .header(reqwest::header::RANGE, &range_clone);
+                
+                if let Some(auth) = auth_clone {
+                    if let Ok(signed_builder) = auth.sign(builder.try_clone().unwrap(), &url_clone, profile_clone.as_ref()).await {
+                        builder = signed_builder;
+                    }
+                }
+                
+                builder.send().await
             });
 
             match response {

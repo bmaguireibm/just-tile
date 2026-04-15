@@ -268,13 +268,13 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
             let is_right_edge = col == tiles_x_count - 1;
             let is_bottom_edge = row == tiles_y_count - 1;
 
-            let actual_w = if is_right_edge && plan.current_width % plan.tw != 0 {
+            let actual_w = if is_right_edge && !plan.current_width.is_multiple_of(plan.tw) {
                 (plan.current_width % plan.tw) as usize
             } else {
                 plan.tw as usize
             };
 
-            let actual_h = if is_bottom_edge && plan.current_height % plan.th != 0 {
+            let actual_h = if is_bottom_edge && !plan.current_height.is_multiple_of(plan.th) {
                 (plan.current_height % plan.th) as usize
             } else {
                 plan.th as usize
@@ -284,13 +284,13 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
             let expected_len = actual_w * actual_h * channels;
             
             if pixels.len() > expected_len {
-                let w16 = (actual_w + 15) / 16 * 16;
-                let h16 = (actual_h + 15) / 16 * 16;
+                let w16 = actual_w.div_ceil(16) * 16;
+                let h16 = actual_h.div_ceil(16) * 16;
                 if w16 * h16 * channels == pixels.len() {
                     stride_w = w16;
                 } else {
-                    let w8 = (actual_w + 7) / 8 * 8;
-                    let h8 = (actual_h + 7) / 8 * 8;
+                    let w8 = actual_w.div_ceil(8) * 8;
+                    let h8 = actual_h.div_ceil(8) * 8;
                     if w8 * h8 * channels == pixels.len() {
                         stride_w = w8;
                     } else if pixels.len() % (actual_h * channels) == 0 {
@@ -305,7 +305,7 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
                     if px as usize >= actual_w || py as usize >= actual_h {
                         continue; // Truncated edge tiles pad out to undefined bounds
                     }
-                    let idx = ((py as usize * stride_w + px as usize) * channels) as usize;
+                    let idx = (py as usize * stride_w + px as usize) * channels;
                     if idx + channels <= pixels.len() {
                         if plan.is_rgba {
                             buf_rgba.put_pixel(

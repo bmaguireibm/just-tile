@@ -15,11 +15,13 @@ use tiff::decoder::Decoder;
 #[derive(Deserialize)]
 struct TileQuery {
     url: String,
+    aws_profile: Option<String>,
 }
 
 struct AppState {
     cache: cache::CogCache,
     client: reqwest::Client,
+    s3_auth: just_tile::s3_auth::S3AuthManager,
 }
 
 async fn health_check() -> &'static str {
@@ -39,9 +41,16 @@ async fn get_tile(
             &query.url,
             entry.content_length,
             state.client.clone(),
+            Some(state.s3_auth.clone()),
+            query.aws_profile.clone(),
         )
     } else {
-        http_reader::HttpRangeReader::new(&query.url, state.client.clone())
+        http_reader::HttpRangeReader::new(
+            &query.url, 
+            state.client.clone(),
+            Some(state.s3_auth.clone()),
+            query.aws_profile.clone(),
+        )
             .await
             .map_err(|e| {
                 println!("Reader init error: {}", e);
@@ -109,9 +118,12 @@ async fn get_tile(
 
 #[tokio::main]
 async fn main() {
+    let mapping_file = std::env::var("S3_ENDPOINT_MAPPING").ok();
+    
     let state = Arc::new(AppState {
         cache: cache::CogCache::new(),
         client: reqwest::Client::new(),
+        s3_auth: just_tile::s3_auth::S3AuthManager::new(mapping_file.as_deref()).await,
     });
 
     let app = Router::new()

@@ -10,7 +10,7 @@ async fn test_element84_cog() {
 
     println!("Testing against Dublin S3 COG...");
     let client = reqwest::Client::new();
-    let mut reader = http_reader::HttpRangeReader::new(url, client)
+    let mut reader = http_reader::HttpRangeReader::new(url, client, None, None)
         .await
         .expect("Failed to create reader");
     let image = tokio::task::spawn_blocking(move || {
@@ -77,7 +77,7 @@ async fn test_element84_cog() {
 async fn test_border_zoom_10() {
     let url = "https://e84-earth-search-sentinel-data.s3.us-west-2.amazonaws.com/sentinel-2-c1-l2a/29/U/PV/2026/3/S2A_T29UPV_20260314T113337_L2A/TCI.tif";
     let client = reqwest::Client::new();
-    let mut reader = http_reader::HttpRangeReader::new(url, client.clone())
+    let mut reader = http_reader::HttpRangeReader::new(url, client.clone(), None, None)
         .await
         .expect("Failed to create reader 1");
     
