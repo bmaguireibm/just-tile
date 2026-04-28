@@ -1,3 +1,4 @@
+use crate::http_reader::CHUNK_SIZE;
 use image::{DynamicImage, Rgb, RgbImage, Rgba, RgbaImage};
 use proj4rs::proj::Proj;
 use proj4rs::transform::transform;
@@ -158,6 +159,7 @@ pub fn plan_tile_extraction<R: Read + Seek>(
     let mut current_height = meta0.height;
     let mut ifd_index = 0;
 
+    let t_ifds = std::time::Instant::now();
     while crop_w_0 * (current_width as f64 / meta0.width as f64) > 512.0 {
         if reader.more_images() && reader.next_image().is_ok() {
             let (w, h) = reader.dimensions().map_err(|e| format!("{:?}", e))?;
@@ -168,6 +170,11 @@ pub fn plan_tile_extraction<R: Read + Seek>(
             break;
         }
     }
+    tracing::info!(
+        "Parsed IFDs to index {} in {:?}",
+        ifd_index,
+        t_ifds.elapsed()
+    );
 
     let scale_factor = current_width as f64 / meta0.width as f64;
     let ifd_corners_vec: Vec<(f64, f64)> = px_corners
@@ -224,6 +231,56 @@ pub fn plan_tile_extraction<R: Read + Seek>(
     })
 }
 
+/// Calculates the expected 1MB chunk indices required to cache all TIFF chunks
+pub fn get_required_cache_chunks<R: Read + Seek>(
+    decoder: &mut Decoder<R>,
+    plan: &TileExtractionPlan,
+) -> Result<Vec<u64>, String> {
+    let offsets = match decoder.get_tag_u64_vec(Tag::TileOffsets) {
+        Ok(v) => v,
+        Err(_) => decoder
+            .get_tag_u32_vec(Tag::TileOffsets)
+            .map_err(|e| format!("Missing TileOffsets: {:?}", e))?
+            .into_iter()
+            .map(|v| v as u64)
+            .collect(),
+    };
+
+    let byte_counts = match decoder.get_tag_u64_vec(Tag::TileByteCounts) {
+        Ok(v) => v,
+        Err(_) => decoder
+            .get_tag_u32_vec(Tag::TileByteCounts)
+            .map_err(|e| format!("Missing TileByteCounts: {:?}", e))?
+            .into_iter()
+            .map(|v| v as u64)
+            .collect(),
+    };
+
+    let tiles_x_count = plan.current_width.div_ceil(plan.tw);
+    let mut chunks = std::collections::HashSet::new();
+
+    for row in plan.start_row..=plan.end_row {
+        for col in plan.start_col..=plan.end_col {
+            let chunk_idx = (row * tiles_x_count + col) as usize;
+            if chunk_idx < offsets.len() && chunk_idx < byte_counts.len() {
+                let offset = offsets[chunk_idx];
+                let length = byte_counts[chunk_idx];
+
+                let start_chunk = offset / CHUNK_SIZE;
+                let end_chunk = (offset + length.saturating_sub(1)) / CHUNK_SIZE;
+
+                for c in start_chunk..=end_chunk {
+                    chunks.insert(c);
+                }
+            }
+        }
+    }
+
+    let mut result: Vec<u64> = chunks.into_iter().collect();
+    result.sort();
+    Ok(result)
+}
+
 /// Extracts a 256x256 map tile from a Cloud Optimized GeoTIFF (COG), given a pre-computed plan.
 ///
 /// This function performs two main steps:
@@ -246,6 +303,7 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
     let tiles_y_count = plan.current_height.div_ceil(plan.th);
 
     // 2. Fetch Data: Loop through all required chunks and stitch them into the buffer.
+    let t_data_load = std::time::Instant::now();
     for row in plan.start_row..=plan.end_row {
         for col in plan.start_col..=plan.end_col {
             let chunk_idx = row * tiles_x_count + col;
@@ -253,7 +311,9 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
             // Fetch the desired chunk, returning an error up the chain if decoding fails
             let pixels = match reader.read_chunk(chunk_idx) {
                 Ok(DecodingResult::U8(px)) => px,
-                Err(tiff::TiffError::FormatError(tiff::TiffFormatError::InconsistentSizesEncountered)) => {
+                Err(tiff::TiffError::FormatError(
+                    tiff::TiffFormatError::InconsistentSizesEncountered,
+                )) => {
                     // Occurs prominently on GDAL/S3 empty padding chunks due to jpeg misalignments
                     continue;
                 }
@@ -268,13 +328,13 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
             let is_right_edge = col == tiles_x_count - 1;
             let is_bottom_edge = row == tiles_y_count - 1;
 
-            let actual_w = if is_right_edge && plan.current_width % plan.tw != 0 {
+            let actual_w = if is_right_edge && !plan.current_width.is_multiple_of(plan.tw) {
                 (plan.current_width % plan.tw) as usize
             } else {
                 plan.tw as usize
             };
 
-            let actual_h = if is_bottom_edge && plan.current_height % plan.th != 0 {
+            let actual_h = if is_bottom_edge && !plan.current_height.is_multiple_of(plan.th) {
                 (plan.current_height % plan.th) as usize
             } else {
                 plan.th as usize
@@ -282,15 +342,15 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
 
             let mut stride_w = actual_w;
             let expected_len = actual_w * actual_h * channels;
-            
+
             if pixels.len() > expected_len {
-                let w16 = (actual_w + 15) / 16 * 16;
-                let h16 = (actual_h + 15) / 16 * 16;
+                let w16 = actual_w.div_ceil(16) * 16;
+                let h16 = actual_h.div_ceil(16) * 16;
                 if w16 * h16 * channels == pixels.len() {
                     stride_w = w16;
                 } else {
-                    let w8 = (actual_w + 7) / 8 * 8;
-                    let h8 = (actual_h + 7) / 8 * 8;
+                    let w8 = actual_w.div_ceil(8) * 8;
+                    let h8 = actual_h.div_ceil(8) * 8;
                     if w8 * h8 * channels == pixels.len() {
                         stride_w = w8;
                     } else if pixels.len() % (actual_h * channels) == 0 {
@@ -305,7 +365,7 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
                     if px as usize >= actual_w || py as usize >= actual_h {
                         continue; // Truncated edge tiles pad out to undefined bounds
                     }
-                    let idx = ((py as usize * stride_w + px as usize) * channels) as usize;
+                    let idx = (py as usize * stride_w + px as usize) * channels;
                     if idx + channels <= pixels.len() {
                         if plan.is_rgba {
                             buf_rgba.put_pixel(
@@ -330,9 +390,12 @@ pub fn extract_tile_from_cog<R: Read + Seek>(
             }
         }
     }
+    tracing::info!("Data loaded and stitched in {:?}", t_data_load.elapsed());
 
     // 3. Resampling: Perform bilinear interpolation to generate the final 256x256 tile.
+    let t_resample = std::time::Instant::now();
     let target = resample_to_tile(&plan, &buf_rgba, &buf_rgb, buf_w, buf_h);
+    tracing::info!("Resampling completed in {:?}", t_resample.elapsed());
 
     Ok(DynamicImage::ImageRgba8(target))
 }

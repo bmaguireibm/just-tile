@@ -48,6 +48,50 @@ docker build -t just-tile .
 docker run -p 3000:3000 just-tile
 ```
 
+## Authentication (AWS S3)
+
+Just-Tile gracefully falls back to unauthenticated, unsigned requests if no credentials are provided. However, it fully supports the standard AWS SDK credential chain:
+
+### 1. Default Environment Variables
+You can pass standard AWS credentials to sign requests to S3 on-the-fly via AWS Signature V4.
+```bash
+AWS_ACCESS_KEY_ID=your_key AWS_SECRET_ACCESS_KEY=your_secret cargo run
+```
+
+### 2. Multi-Endpoint Configuration (Mapping File)
+If you require multiple credentials corresponding to different buckets/endpoints (like an internal Minio instance + AWS S3), you can supply a JSON mapping file using standard AWS Profile names from `~/.aws/credentials`:
+```bash
+S3_ENDPOINT_MAPPING=endpoints.json cargo run
+```
+**`endpoints.json` example:**
+```json
+{
+  "internal-minio.acme.com": "minio_local",
+  "s3.us-west-2.amazonaws.com": "default"
+}
+```
+
+### 3. API Option Overrides
+If you define multiple AWS Profiles in standard `~/.aws/credentials`, clients can optionally dictate the authentication profile used for any request:
+```bash
+GET /{z}/{x}/{y}?url=s3://my-secret-bucket/data.tif&aws_profile=dev_bucket_admin
+```
+
+### Running Auth with Docker
+When using Docker, you can pass credentials cleanly via environment variables or mount your local `.aws` directory for profiles:
+```bash
+docker run -p 3000:3000 \
+  -e AWS_ACCESS_KEY_ID=xxx \
+  -e AWS_SECRET_ACCESS_KEY=yyy \
+  -e AWS_REGION=us-west-2 \
+  just-tile
+```
+Or mount standard profiles configurations:
+```bash
+docker run -p 3000:3000 -v ~/.aws:/root/.aws:ro just-tile
+```
+
+
 ## Performance Architecture
 
 - **Planning Phase**: Extracts GeoKey and IFD metadata (cached).
