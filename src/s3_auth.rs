@@ -27,7 +27,11 @@ impl S3AuthManager {
             if let Ok(data) = std::fs::read_to_string(path) {
                 if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&data) {
                     endpoint_mapping = map;
-                    println!("Loaded {} custom endpoint mappings from {}", endpoint_mapping.len(), path);
+                    println!(
+                        "Loaded {} custom endpoint mappings from {}",
+                        endpoint_mapping.len(),
+                        path
+                    );
                 } else {
                     eprintln!("Failed to parse endpoint mapping JSON at {}", path);
                 }
@@ -43,7 +47,11 @@ impl S3AuthManager {
         }
     }
 
-    pub async fn get_config<'a>(&'a self, override_profile: Option<&'a String>, url: &'a str) -> SdkConfig {
+    pub async fn get_config<'a>(
+        &'a self,
+        override_profile: Option<&'a String>,
+        url: &'a str,
+    ) -> SdkConfig {
         let profile_name = if let Some(p) = override_profile {
             Some(p.clone())
         } else if let Ok(parsed_url) = Url::parse(url) {
@@ -69,7 +77,10 @@ impl S3AuthManager {
         }
 
         // Lazy load the profile config
-        let profile_config = aws_config::defaults(BehaviorVersion::latest()).profile_name(&profile_name).load().await;
+        let profile_config = aws_config::defaults(BehaviorVersion::latest())
+            .profile_name(&profile_name)
+            .load()
+            .await;
         let mut configs = self.profile_configs.write().await;
         configs.insert(profile_name.clone(), profile_config.clone());
         profile_config
@@ -142,7 +153,7 @@ impl S3AuthManager {
             .uri(url_str)
             .body(())
             .unwrap();
-            
+
         instructions.apply_to_request_http0x(&mut dummy_req);
 
         // Inject the newly generated authorization headers back into the original builder
@@ -157,27 +168,35 @@ impl S3AuthManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[tokio::test]
     async fn test_sign_without_credentials_skips_signing() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         // Clear any AWS environment variables that might interfere with tests
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-        // By unsetting these, we simulate an unauthenticated environment.
-        
+        // Ensure AWS Config doesn't silently load the ~/.aws/credentials off the host machine running the tests
+        std::env::set_var("AWS_CONFIG_FILE", "/dev/null");
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", "/dev/null");
+        std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+
         // This will build a SdkConfig natively trying to find credentials
         let auth_manager = S3AuthManager::new(None).await;
-        
+
         let client = reqwest::Client::new();
         let builder = client.get("https://s3.amazonaws.com/test/data.tif");
 
         // Attempt to sign
-        let signed_builder = auth_manager.sign(builder, "https://s3.amazonaws.com/test/data.tif", None)
+        let signed_builder = auth_manager
+            .sign(builder, "https://s3.amazonaws.com/test/data.tif", None)
             .await
             .expect("Signing should not fail, just return the unauthenticated builder");
-            
+
         let request = signed_builder.build().unwrap();
-        
+
         // The Authorization header should NOT be present
         assert!(!request.headers().contains_key("Authorization"));
         assert!(!request.headers().contains_key("x-amz-date"));
@@ -185,32 +204,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_sign_with_credentials_adds_auth() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         // Set fake AWS environment variables to simulate an authenticated environment
         std::env::set_var("AWS_ACCESS_KEY_ID", "fake_key");
         std::env::set_var("AWS_SECRET_ACCESS_KEY", "fake_secret");
         std::env::set_var("AWS_REGION", "us-west-2");
-        
+
         // The SdkConfig will pick up these variables natively
         let auth_manager = S3AuthManager::new(None).await;
-        
+
         let client = reqwest::Client::new();
         let builder = client.get("https://s3.amazonaws.com/test/data.tif");
 
         // Attempt to sign
-        let signed_builder = auth_manager.sign(builder, "https://s3.amazonaws.com/test/data.tif", None)
+        let signed_builder = auth_manager
+            .sign(builder, "https://s3.amazonaws.com/test/data.tif", None)
             .await
             .expect("Signing should succeed");
-            
+
         let request = signed_builder.build().unwrap();
-        
+
         // The Authorization and Date headers should now be present due to sigv4 instructions
         assert!(request.headers().contains_key("Authorization"));
         assert!(request.headers().contains_key("x-amz-date"));
-        
+
         // Cleanup env
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
         std::env::remove_var("AWS_REGION");
     }
 }
-

@@ -5,19 +5,35 @@ use tiff::decoder::Decoder;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_element84_cog() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let url = "https://e84-earth-search-sentinel-data.s3.us-west-2.amazonaws.com/sentinel-2-c1-l2a/29/U/PV/2026/3/S2A_T29UPV_20260314T113337_L2A/TCI.tif";
     let (z, x, y) = (11, 988, 660);
 
     println!("Testing against Dublin S3 COG...");
     let client = reqwest::Client::new();
-    let mut reader = http_reader::HttpRangeReader::new(url, client, None, None)
+    let cache = std::sync::Arc::new(just_tile::cache::SharedChunkCache::default());
+    let mut reader = http_reader::HttpRangeReader::new(url, client, None, None, cache)
         .await
         .expect("Failed to create reader");
     let image = tokio::task::spawn_blocking(move || {
         let mut decoder = Decoder::new(&mut reader).expect("Failed to create decoder");
         let plan = geotiff::plan_tile_extraction(&mut decoder, z, x, y).expect("Failed to plan");
+
+        let chunk_indices = geotiff::get_required_cache_chunks(&mut decoder, &plan).unwrap();
+        drop(decoder);
+        reader.cache_chunks_concurrently(&chunk_indices).unwrap();
+
+        use std::io::Seek;
+        reader.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut decoder = Decoder::new(&mut reader).unwrap();
+        for _ in 0..plan.ifd_index {
+            decoder.next_image().unwrap();
+        }
+
         geotiff::extract_tile_from_cog(decoder, plan).expect("Failed to extract")
-    }).await.expect("Task panicked");
+    })
+    .await
+    .expect("Task panicked");
 
     assert_eq!(image.width(), 256);
     assert_eq!(image.height(), 256);
@@ -77,16 +93,32 @@ async fn test_element84_cog() {
 async fn test_border_zoom_10() {
     let url = "https://e84-earth-search-sentinel-data.s3.us-west-2.amazonaws.com/sentinel-2-c1-l2a/29/U/PV/2026/3/S2A_T29UPV_20260314T113337_L2A/TCI.tif";
     let client = reqwest::Client::new();
-    let mut reader = http_reader::HttpRangeReader::new(url, client.clone(), None, None)
+    let cache = std::sync::Arc::new(just_tile::cache::SharedChunkCache::default());
+    let mut reader = http_reader::HttpRangeReader::new(url, client.clone(), None, None, cache)
         .await
         .expect("Failed to create reader 1");
-    
+
     // Evaluate 10/494/332 (which the user reports is skewed)
     let image_result = tokio::task::spawn_blocking(move || {
         let mut decoder = Decoder::new(&mut reader).expect("Failed to create decoder");
-        let plan = geotiff::plan_tile_extraction(&mut decoder, 10, 494, 332).expect("Failed to plan");
+        let plan =
+            geotiff::plan_tile_extraction(&mut decoder, 10, 494, 332).expect("Failed to plan");
+
+        let chunk_indices = geotiff::get_required_cache_chunks(&mut decoder, &plan).unwrap();
+        drop(decoder);
+        reader.cache_chunks_concurrently(&chunk_indices).unwrap();
+
+        use std::io::Seek;
+        reader.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut decoder = Decoder::new(&mut reader).unwrap();
+        for _ in 0..plan.ifd_index {
+            decoder.next_image().unwrap();
+        }
+
         geotiff::extract_tile_from_cog(decoder, plan)
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 
     let image = image_result.expect("Tile extraction failed");
     assert_eq!(image.width(), 256);
@@ -95,7 +127,10 @@ async fn test_border_zoom_10() {
     // Save outputs or analyze raw pixels to assert it's densely filled, preventing black skews
     let gen_raw = image.to_rgba8().into_raw();
     let bright_pixels = gen_raw.iter().filter(|&&p| p > 10).count();
-    
+
     // Ensure > 20% of the image output isn't absolute black or heavily skewed transparency
-    assert!(bright_pixels > 50000, "Image contains anomalous amounts of black padded noise, which is expected by the skew bug");
+    assert!(
+        bright_pixels > 50000,
+        "Image contains anomalous amounts of black padded noise, which is expected by the skew bug"
+    );
 }
